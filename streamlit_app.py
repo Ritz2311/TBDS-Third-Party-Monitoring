@@ -117,21 +117,26 @@ def parse_csv_file(uploaded_file):
     return df[["timestamp", "event_type", "source"]].to_dict("records")
 
 
+
 def calculate_features(df, start_date, end_date):
     selected = df[
         (df["timestamp"].dt.date >= start_date) &
         (df["timestamp"].dt.date <= end_date)
     ]
 
+    total_days = (end_date - start_date).days + 1
+    total_days = max(total_days, 1)
+
     counts = selected["event_type"].value_counts().to_dict()
 
     return {
-        "comments": counts.get("comment", 0),
-        "reactions": counts.get("reaction", 0),
-        "shares": counts.get("share", 0),
-        "friend_activity": counts.get("friend", 0),
-        "login_activity": counts.get("login", 0)
+        "comments": counts.get("comment", 0) / total_days,
+        "reactions": counts.get("reaction", 0) / total_days,
+        "shares": counts.get("share", 0) / total_days,
+        "friend_activity": counts.get("friend", 0) / total_days,
+        "login_activity": counts.get("login", 0) / total_days
     }
+
 
 
 def calculate_tbds(past, recent, weights):
