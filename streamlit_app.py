@@ -5,7 +5,6 @@ import numpy as np
 import json
 import plotly.express as px
 from datetime import date, timedelta
-from collections import Counter
 
 st.set_page_config(
     page_title="TBDS Account Monitoring",
@@ -26,13 +25,39 @@ st.info(
 
 # ---------------- SESSION STATE ----------------
 
+EVENT_COLUMNS = [
+    "timestamp", "event_type", "source", "account"
+]
+
 if "events" not in st.session_state:
-    st.session_state.events = pd.DataFrame(
-        columns=["timestamp", "event_type", "source"]
-    )
+    st.session_state.events = pd.DataFrame(columns=EVENT_COLUMNS)
+else:
+    # Add account field to records created by an older version.
+    if "account" not in st.session_state.events.columns:
+        st.session_state.events["account"] = "Unassigned"
+
+    for column in EVENT_COLUMNS:
+        if column not in st.session_state.events.columns:
+            st.session_state.events[column] = None
+
+    st.session_state.events = st.session_state.events[EVENT_COLUMNS]
 
 if "analysis" not in st.session_state:
-    st.session_state.analysis = None
+    st.session_state.analysis = {}
+
+# Ensure analysis is stored separately for each account.
+if not isinstance(st.session_state.analysis, dict):
+    st.session_state.analysis = {}
+
+
+def empty_events():
+    return pd.DataFrame(columns=EVENT_COLUMNS)
+
+
+def get_account_events(account):
+    return st.session_state.events[
+        st.session_state.events["account"] == account
+    ].copy()
 
 
 # ---------------- DATA PROCESSING ----------------
@@ -77,7 +102,6 @@ def parse_json_file(uploaded_file):
     data = json.load(uploaded_file)
     records = []
 
-    # Recognize common Facebook Download Your Information filenames.
     filename = uploaded_file.name.lower()
 
     if "comment" in filename:
@@ -86,7 +110,11 @@ def parse_json_file(uploaded_file):
         event_type = "reaction"
     elif "friend" in filename:
         event_type = "friend"
-    elif "login" in filename or "logout" in filename or "access" in filename:
+    elif (
+        "login" in filename
+        or "logout" in filename
+        or "access" in filename
+    ):
         event_type = "login"
     elif "share" in filename:
         event_type = "share"
@@ -100,7 +128,6 @@ def parse_json_file(uploaded_file):
 def parse_csv_file(uploaded_file):
     df = pd.read_csv(uploaded_file)
 
-    # Expected columns: timestamp, event_type
     if "timestamp" not in df.columns or "event_type" not in df.columns:
         raise ValueError(
             "CSV must contain columns named timestamp and event_type."
@@ -115,7 +142,6 @@ def parse_csv_file(uploaded_file):
     df["source"] = "CSV import"
 
     return df[["timestamp", "event_type", "source"]].to_dict("records")
-
 
 
 def calculate_features(df, start_date, end_date):
@@ -138,7 +164,6 @@ def calculate_features(df, start_date, end_date):
     }
 
 
-
 def calculate_tbds(past, recent, weights):
     rows = []
     score = 0.0
@@ -147,7 +172,11 @@ def calculate_tbds(past, recent, weights):
         past_value = float(past[feature])
         recent_value = float(recent[feature])
 
-        divergence = abs(recent_value - past_value) / (past_value + 1e-6)
+        divergence = (
+            abs(recent_value - past_value) /
+            (past_value + 1e-6)
+        )
+
         contribution = weights[feature] * divergence
         score += contribution
 
@@ -178,6 +207,36 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.divider()
+st.sidebar.subheader("Account Management")
+
+# Known accounts and any additional account names already imported.
+known_accounts = ["User 1", "User 2"]
+
+existing_accounts = (
+    st.session_state.events["account"]
+    .dropna()
+    .astype(str)
+    .unique()
+    .tolist()
+)
+
+account_options = known_accounts + [
+    name for name in existing_accounts
+    if name not in known_accounts
+]
+
+selected_account = st.sidebar.selectbox(
+    "Select Account",
+    account_options,
+    key="selected_account"
+)
+
+st.sidebar.caption(
+    "All dashboard, import, analysis and record views "
+    "are filtered by the selected account."
+)
+
+st.sidebar.divider()
 st.sidebar.caption("TBDS Research Prototype")
 
 
@@ -186,8 +245,10 @@ st.sidebar.caption("TBDS Research Prototype")
 if page == "Dashboard":
 
     st.subheader("Monitoring Dashboard")
+    st.write(f"**Selected Account:** {selected_account}")
 
-    total = len(st.session_state.events)
+    account_df = get_account_events(selected_account)
+    total = len(account_df)
 
     c1, c2, c3 = st.columns(3)
 
@@ -196,18 +257,17 @@ if page == "Dashboard":
     if total:
         c2.metric(
             "Activity Types",
-            st.session_state.events["event_type"].nunique()
+            account_df["event_type"].nunique()
         )
         c3.metric(
             "Data Sources",
-            st.session_state.events["source"].nunique()
+            account_df["source"].nunique()
         )
     else:
         c2.metric("Activity Types", 0)
         c3.metric("Data Sources", 0)
 
     st.divider()
-
     st.subheader("System Overview")
 
     st.write(
@@ -224,7 +284,7 @@ if page == "Dashboard":
 
     if total:
         chart_data = (
-            st.session_state.events["event_type"]
+            account_df["event_type"]
             .value_counts()
             .reset_index()
         )
@@ -234,11 +294,14 @@ if page == "Dashboard":
             chart_data,
             x="Activity Type",
             y="Count",
-            title="Imported Activity Distribution"
+            title=f"Activity Distribution – {selected_account}"
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("No activity data imported yet. Open Import Activity Data.")
+        st.warning(
+            f"No activity data imported for {selected_account}. "
+            "Open Import Activity Data."
+        )
 
 
 # ---------------- IMPORT DATA ----------------
@@ -246,6 +309,7 @@ if page == "Dashboard":
 elif page == "Import Activity Data":
 
     st.subheader("Import Authorized Account Activity")
+    st.write(f"**Importing data for:** {selected_account}")
 
     st.write(
         "Upload Facebook Download Your Information JSON files "
@@ -285,20 +349,33 @@ elif page == "Import Activity Data":
 
             if all_records:
                 new_df = pd.DataFrame(all_records)
+
                 new_df["timestamp"] = pd.to_datetime(
                     new_df["timestamp"], errors="coerce"
                 )
+
                 new_df = new_df.dropna(subset=["timestamp"])
+                new_df["account"] = selected_account
+
+                new_df = new_df[EVENT_COLUMNS]
 
                 st.session_state.events = pd.concat(
                     [st.session_state.events, new_df],
                     ignore_index=True
                 )
 
-                st.session_state.analysis = None
+                st.session_state.analysis.pop(selected_account, None)
 
                 st.success(
-                    f"Successfully imported {len(new_df)} activity events."
+                    f"Successfully imported {len(new_df)} activity events "
+                    f"for {selected_account}."
+                )
+
+                st.dataframe(
+                    new_df["event_type"].value_counts().rename_axis(
+                        "Activity Type"
+                    ).reset_index(name="Count"),
+                    use_container_width=True
                 )
 
             if errors:
@@ -311,11 +388,13 @@ elif page == "Import Activity Data":
                 )
 
     st.divider()
-
     st.subheader("Manual Activity Entry")
 
     with st.form("manual_event_form"):
-        event_date = st.date_input("Activity Date", value=date.today())
+        event_date = st.date_input(
+            "Activity Date",
+            value=date.today()
+        )
 
         event_type = st.selectbox(
             "Activity Type",
@@ -334,7 +413,8 @@ elif page == "Import Activity Data":
             new_event = pd.DataFrame([{
                 "timestamp": pd.Timestamp(event_date),
                 "event_type": event_type,
-                "source": "Manual entry"
+                "source": "Manual entry",
+                "account": selected_account
             }])
 
             st.session_state.events = pd.concat(
@@ -342,8 +422,11 @@ elif page == "Import Activity Data":
                 ignore_index=True
             )
 
-            st.session_state.analysis = None
-            st.success("Activity event added.")
+            st.session_state.analysis.pop(selected_account, None)
+
+            st.success(
+                f"Activity event added to {selected_account}."
+            )
 
 
 # ---------------- TBDS ANALYSIS ----------------
@@ -351,52 +434,63 @@ elif page == "Import Activity Data":
 elif page == "TBDS Analysis":
 
     st.subheader("Temporal Behavioral Divergence Analysis")
+    st.write(f"**Selected Account:** {selected_account}")
 
-    if st.session_state.events.empty:
-        st.warning("Import activity data before performing analysis.")
+    df = get_account_events(selected_account)
+
+    if df.empty:
+        st.warning(
+            f"Import activity data for {selected_account} "
+            "before performing analysis."
+        )
+
     else:
-        df = st.session_state.events.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
         minimum_date = df["timestamp"].min().date()
         maximum_date = df["timestamp"].max().date()
 
-        st.write("Select the historical and recent observation periods.")
+        midpoint = minimum_date + (
+            maximum_date - minimum_date
+        ) // 2
+
+        st.write(
+            "Select the historical and recent observation periods."
+        )
 
         col1, col2 = st.columns(2)
 
         with col1:
             st.markdown("**Historical Baseline Period**")
+
             past_start = st.date_input(
                 "Baseline start",
                 value=minimum_date,
-                key="past_start"
+                key=f"past_start_{selected_account}"
             )
+
             past_end = st.date_input(
                 "Baseline end",
-                value=minimum_date + (
-                    maximum_date - minimum_date
-                ) // 2,
-                key="past_end"
+                value=midpoint,
+                key=f"past_end_{selected_account}"
             )
 
         with col2:
             st.markdown("**Recent Behavior Period**")
+
             recent_start = st.date_input(
                 "Recent start",
-                value=minimum_date + (
-                    maximum_date - minimum_date
-                ) // 2 + timedelta(days=1),
-                key="recent_start"
+                value=min(midpoint + timedelta(days=1), maximum_date),
+                key=f"recent_start_{selected_account}"
             )
+
             recent_end = st.date_input(
                 "Recent end",
                 value=maximum_date,
-                key="recent_end"
+                key=f"recent_end_{selected_account}"
             )
 
         st.divider()
-
         st.subheader("TBDS Configuration")
 
         threshold = st.slider(
@@ -404,7 +498,8 @@ elif page == "TBDS Analysis":
             min_value=0.1,
             max_value=2.0,
             value=0.7,
-            step=0.05
+            step=0.05,
+            key=f"threshold_{selected_account}"
         )
 
         st.write("Feature Weights")
@@ -436,7 +531,7 @@ elif page == "TBDS Analysis":
                     max_value=1.0,
                     value=default_weights[feature],
                     step=0.05,
-                    key=f"weight_{feature}"
+                    key=f"weight_{feature}_{selected_account}"
                 )
 
         weight_total = sum(weights.values())
@@ -451,13 +546,21 @@ elif page == "TBDS Analysis":
             "Weights are normalized automatically so their total equals 1."
         )
 
-        if st.button("Calculate TBDS", type="primary"):
+        if st.button(
+            "Calculate TBDS",
+            type="primary",
+            key=f"calculate_{selected_account}"
+        ):
 
             if past_start > past_end:
-                st.error("Historical start date must not exceed end date.")
+                st.error(
+                    "Historical start date must not exceed end date."
+                )
 
             elif recent_start > recent_end:
-                st.error("Recent start date must not exceed end date.")
+                st.error(
+                    "Recent start date must not exceed end date."
+                )
 
             elif past_end >= recent_start:
                 st.error(
@@ -466,11 +569,18 @@ elif page == "TBDS Analysis":
                 )
 
             elif weight_total == 0:
-                st.error("At least one feature weight must be greater than zero.")
+                st.error(
+                    "At least one feature weight must be greater than zero."
+                )
 
             else:
-                past = calculate_features(df, past_start, past_end)
-                recent = calculate_features(df, recent_start, recent_end)
+                past = calculate_features(
+                    df, past_start, past_end
+                )
+
+                recent = calculate_features(
+                    df, recent_start, recent_end
+                )
 
                 if sum(past.values()) == 0:
                     st.error(
@@ -495,16 +605,20 @@ elif page == "TBDS Analysis":
                         else "Normal"
                     )
 
-                    st.session_state.analysis = {
+                    st.session_state.analysis[selected_account] = {
                         "score": score,
                         "threshold": threshold,
                         "decision": decision,
                         "details": result_df,
                         "past": past,
-                        "recent": recent
+                        "recent": recent,
+                        "historical_start": str(past_start),
+                        "historical_end": str(past_end),
+                        "recent_start": str(recent_start),
+                        "recent_end": str(recent_end)
                     }
 
-        result = st.session_state.analysis
+        result = st.session_state.analysis.get(selected_account)
 
         if result is not None:
 
@@ -530,6 +644,18 @@ elif page == "TBDS Analysis":
                 "It does not independently prove account compromise."
             )
 
+            st.subheader("Analysis Periods")
+
+            st.write(
+                f"Historical: {result['historical_start']} "
+                f"to {result['historical_end']}"
+            )
+
+            st.write(
+                f"Recent: {result['recent_start']} "
+                f"to {result['recent_end']}"
+            )
+
             st.subheader("Feature-wise Divergence")
 
             display_df = result["details"].copy()
@@ -542,22 +668,29 @@ elif page == "TBDS Analysis":
             ]:
                 display_df[column] = display_df[column].round(4)
 
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(
+                display_df,
+                use_container_width=True
+            )
 
             fig = px.bar(
                 display_df,
                 x="Feature",
                 y="Divergence",
-                title="Temporal Feature Divergence"
+                title=f"Temporal Feature Divergence – {selected_account}"
             )
-            st.plotly_chart(fig, use_container_width=True)
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
 
             csv = display_df.to_csv(index=False).encode("utf-8")
 
             st.download_button(
                 "Download TBDS Analysis Report",
                 data=csv,
-                file_name="TBDS_analysis_report.csv",
+                file_name=f"{selected_account.replace(' ', '_')}_TBDS_report.csv",
                 mime="text/csv"
             )
 
@@ -567,24 +700,52 @@ elif page == "TBDS Analysis":
 elif page == "Monitoring Records":
 
     st.subheader("Imported Monitoring Records")
+    st.write(f"**Selected Account:** {selected_account}")
 
-    if st.session_state.events.empty:
-        st.info("No activity records available.")
+    account_df = get_account_events(selected_account)
+
+    if account_df.empty:
+        st.info(
+            f"No activity records available for {selected_account}."
+        )
+
     else:
+        st.metric(
+            "Account Activity Events",
+            len(account_df)
+        )
+
         st.dataframe(
-            st.session_state.events.sort_values(
-                "timestamp", ascending=False
+            account_df.sort_values(
+                "timestamp",
+                ascending=False
             ),
             use_container_width=True
         )
 
-        if st.button("Clear All Imported Records"):
-            st.session_state.events = pd.DataFrame(
-                columns=["timestamp", "event_type", "source"]
+        if st.button(
+            f"Clear {selected_account} Records",
+            type="secondary"
+        ):
+            st.session_state.events = st.session_state.events[
+                st.session_state.events["account"] != selected_account
+            ].reset_index(drop=True)
+
+            st.session_state.analysis.pop(selected_account, None)
+
+            st.success(
+                f"Records for {selected_account} cleared."
             )
-            st.session_state.analysis = None
-            st.success("Records cleared.")
             st.rerun()
+
+    st.divider()
+
+    if st.button("Clear All Accounts' Records"):
+        st.session_state.events = empty_events()
+        st.session_state.analysis = {}
+
+        st.success("All account records cleared.")
+        st.rerun()
 
 
 # ---------------- RESEARCH INFORMATION ----------------
@@ -620,10 +781,9 @@ elif page == "Research Information":
 
         **Important Limitation**
 
-        This application currently analyzes imported or manually entered
-        events. It does not yet provide continuous third-party data
-        collection, direct Facebook integration, or automatic account
-        compromise confirmation.
+        This application analyzes imported or manually entered events.
+        It does not yet provide continuous third-party data collection,
+        direct Facebook integration, or automatic account compromise confirmation.
         """
     )
 
@@ -633,10 +793,10 @@ elif page == "Research Information":
         "privacy requirements, and API availability."
     )
 
+
 st.divider()
 
 st.caption(
     "TBDS Research Prototype | Behavioral Anomaly Monitoring | "
     "No machine-learning classifier is used."
 )
-
